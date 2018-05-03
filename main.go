@@ -1,8 +1,6 @@
 /*
  * GO POE DB
  * Created in order to make requests.
- *
- *
  */
 
 package main
@@ -11,11 +9,15 @@ import (
 	"net/http"
 	"time"
 	"io/ioutil"
-	"fmt"
 	"encoding/json"
+	"os"
+	"database/sql"
+	_ "github.com/mattn/go-sqlite3"
+	"log"
 )
 
 const POE_API_ENDPOINT = `http://api.pathofexile.com/public-stash-tabs`
+const DB_NAME = "poe_eve_db.db"
 const POE_API_PUBLIC_STASH_TABS = `public-stash-tabs`
 const TIME_BETWEEN_REQUESTS = 5;
 const THREADS = 4;
@@ -88,15 +90,100 @@ type PublicStashesRequest struct {
 func main() {
 	var publicStashRequest PublicStashesRequest
 
+	db := getDB()
+
 	resp := reliableGet(POE_API_ENDPOINT, 5)
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
-	if err == nil {
-		err = json.Unmarshal(body, &publicStashRequest)
-		fmt.Println(publicStashRequest.Stashes[20])
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = json.Unmarshal(body, &publicStashRequest)
+
+	insertStashesIntoDB(publicStashRequest, db)
+}
+
+func insertStashesIntoDB(request PublicStashesRequest, db *sql.DB) {
+	tx, err := db.Begin()
+
+	if err != nil {
+		log.Fatal(err)
 	}
 
+	stmt, err := tx.Prepare(`
+	INSERT INTO Stash (
+		id, stashID, accountName, lastCharacterName,
+		stash, stashType
+	) VALUES (?, ?, ?, ?, ?, ?)`)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer stmt.Close()
+
+	for i, stash := range request.Stashes {
+		_, err = stmt.Exec(i, stash.Id, stash.AccountName, stash.LastCharacterName, stash.Stash, stash.StashType)
+
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	tx.Commit()
+
+}
+
+func createDB() *sql.DB {
+	createBasicTable := `
+	create table Stash (
+		id INTEGER NOT NULL PRIMARY KEY, 
+		stashID INTEGER NOT NULL,
+		accountName TEXT NOT NULL,
+		lastCharacterName TEXT NOT NULL,
+		stash TEXT NOT NULL,
+		stashType BOOLEAN NOT NULL)
+	`
+
+	db, err := sql.Open("sqlite3", DB_NAME)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = db.Exec(createBasicTable)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return db
+}
+
+func getDB() *sql.DB {
+	if !doesDBExist() {
+		return createDB()
+	}
+
+	db, err := sql.Open("sqlite3", DB_NAME)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return db
+
+}
+
+func doesDBExist() bool {
+	_, err := os.Stat(DB_NAME)
+
+	if os.IsNotExist(err) {
+		return false
+	}
+
+	return true
 }
 
 func reliableGet(url string, tries int) *http.Response {
